@@ -12,74 +12,16 @@
 # or https://opensource.org/licenses/MIT
 
 exiterr()  { echo "Error: $1" >&2; exit 1; }
-exiterr2() { exiterr "'apt-get install' failed."; }
-exiterr3() { exiterr "'yum install' failed."; }
+exiterr2() { exiterr "'apk add' failed."; }
+
+firewall="nftables"
+wgfw="wg-firewall"
 
 check_ip() {
 	IP_REGEX='^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
 	printf '%s' "$1" | tr -d '\n' | grep -Eq "$IP_REGEX"
 }
 
-check_os() {
-	if grep -qs "ubuntu" /etc/os-release; then
-		os="ubuntu"
-		os_version=$(grep 'VERSION_ID' /etc/os-release | cut -d '"' -f 2 | tr -d '.')
-	elif [[ -e /etc/debian_version ]]; then
-		os="debian"
-		os_version=$(grep -oE '[0-9]+' /etc/debian_version | head -1)
-	elif [[ -e /etc/almalinux-release || -e /etc/rocky-release || -e /etc/centos-release ]]; then
-		os="centos"
-		os_version=$(grep -shoE '[0-9]+' /etc/almalinux-release /etc/rocky-release /etc/centos-release | head -1)
-	elif [[ -e /etc/fedora-release ]]; then
-		os="fedora"
-		os_version=$(grep -oE '[0-9]+' /etc/fedora-release | head -1)
-	else
-		exiterr "This installer seems to be running on an unsupported distribution.
-Supported distros are Ubuntu, Debian, AlmaLinux, Rocky Linux, CentOS and Fedora."
-	fi
-}
-
-check_os_ver() {
-	if [[ "$os" == "ubuntu" && "$os_version" -lt 1804 ]]; then
-		exiterr "Ubuntu 18.04 or higher is required to use this installer.
-This version of Ubuntu is too old and unsupported."
-	fi
-
-	if [[ "$os" == "debian" && "$os_version" -lt 10 ]]; then
-		exiterr "Debian 10 or higher is required to use this installer.
-This version of Debian is too old and unsupported."
-	fi
-
-	if [[ "$os" == "centos" && "$os_version" -lt 7 ]]; then
-		exiterr "CentOS 7 or higher is required to use this installer.
-This version of CentOS is too old and unsupported."
-	fi
-}
-
-check_nftables() {
-	if [ "$os" = "centos" ]; then
-		if grep -qs "hwdsl2 VPN script" /etc/sysconfig/nftables.conf \
-			|| systemctl is-active --quiet nftables 2>/dev/null; then
-			exiterr "This system has nftables enabled, which is not supported by this installer."
-		fi
-	fi
-}
-
-install_wget() {
-	# Detect some Debian minimal setups where neither wget nor curl are installed
-	if ! hash wget 2>/dev/null && ! hash curl 2>/dev/null; then
-		if [ "$auto" = 0 ]; then
-			echo "Wget is required to use this installer."
-			read -n1 -r -p "Press any key to install Wget and continue..."
-		fi
-		export DEBIAN_FRONTEND=noninteractive
-		(
-			set -x
-			apt-get -yqq update || apt-get -yqq update
-			apt-get -yqq install wget >/dev/null
-		) || exiterr2
-	fi
-}
 
 install_iproute() {
 	if ! hash ip 2>/dev/null; then
@@ -87,19 +29,36 @@ install_iproute() {
 			echo "iproute is required to use this installer."
 			read -n1 -r -p "Press any key to install iproute and continue..."
 		fi
-		if [ "$os" = "debian" ] || [ "$os" = "ubuntu" ]; then
-			export DEBIAN_FRONTEND=noninteractive
-			(
-				set -x
-				apt-get -yqq update || apt-get -yqq update
-				apt-get -yqq install iproute2 >/dev/null
-			) || exiterr2
-		else
-			(
-				set -x
-				yum -y -q install iproute >/dev/null
-			) || exiterr3
+		(
+			set -x
+			apk add iproute2 >/dev/null
+		) || exiterr2
+	fi
+}
+
+install_wg_tool() {
+	if ! hash wg 2>/dev/null; then
+		if [ "$auto" = 0 ]; then
+			echo "wireguard-tools is required to use this installer."
+			read -n1 -r -p "Press any key to install wireguard-tools and continue..."
 		fi
+		(
+			set -x
+			apk add wireguard-tools >/dev/null
+		) || exiterr2
+	fi
+}
+
+install_nftables() {
+	if ! hash nft 2>/dev/null; then
+		if [ "$auto" = 0 ]; then
+			echo "nftables is required to use this installer."
+			read -n1 -r -p "Press any key to install nftables and continue..."
+		fi
+		(
+			set -x
+			apk add nftables >/dev/null
+		) || exiterr2
 	fi
 }
 
@@ -118,16 +77,6 @@ show_start_setup() {
 	fi
 }
 
-find_public_ip() {
-	ip_url1="http://ipv4.icanhazip.com"
-	ip_url2="http://ip1.dynupdate.no-ip.com"
-	# Get public IP and sanitize with grep
-	get_public_ip=$(grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$(wget -T 10 -t 1 -4qO- "$ip_url1" || curl -m 10 -4Ls "$ip_url1")")
-	if ! check_ip "$get_public_ip"; then
-		get_public_ip=$(grep -m 1 -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' <<< "$(wget -T 10 -t 1 -4qO- "$ip_url2" || curl -m 10 -4Ls "$ip_url2")")
-	fi
-}
-
 detect_ip() {
 	# If system has a single IPv4, it is selected automatically.
 	if [[ $(ip -4 addr | grep inet | grep -vEc '127(\.[0-9]{1,3}){3}') -eq 1 ]]; then
@@ -136,7 +85,6 @@ detect_ip() {
 		# Use the IP address on the default route
 		ip=$(ip -4 route get 1 | sed 's/ uid .*//' | awk '{print $NF;exit}' 2>/dev/null)
 		if ! check_ip "$ip"; then
-			find_public_ip
 			ip_match=0
 			if [ -n "$get_public_ip" ]; then
 				ip_list=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}')
@@ -173,30 +121,6 @@ detect_ip() {
 	fi
 }
 
-check_nat_ip() {
-	# If $ip is a private IP address, the server must be behind NAT
-	if printf '%s' "$ip" | grep -qE '^(10|127|172\.(1[6-9]|2[0-9]|3[0-1])|192\.168|169\.254)\.'; then
-		find_public_ip
-		if ! check_ip "$get_public_ip"; then
-			if [ "$auto" = 0 ]; then
-				echo
-				echo "This server is behind NAT. What is the public IPv4 address?"
-				read -rp "Public IPv4 address: " public_ip
-				until check_ip "$public_ip"; do
-					echo "Invalid input."
-					read -rp "Public IPv4 address: " public_ip
-				done
-			else
-				echo "Error: Could not detect this server's public IP." >&2
-				echo "Abort. No changes were made." >&2
-				exit 1
-			fi
-		else
-			public_ip="$get_public_ip"
-		fi
-	fi
-}
-
 show_config() {
 	if [ "$auto" != 0 ]; then
 		echo
@@ -205,31 +129,6 @@ show_config() {
 		echo "Port: UDP/51820"
 		echo "Client name: client"
 		echo "Client DNS: Google Public DNS"
-	fi
-}
-
-detect_ipv6() {
-	# If system has a single IPv6, it is selected automatically
-	if [[ $(ip -6 addr | grep -c 'inet6 [23]') -eq 1 ]]; then
-		ip6=$(ip -6 addr | grep 'inet6 [23]' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}')
-	fi
-	# If system has multiple IPv6, ask the user to select one
-	if [[ $(ip -6 addr | grep -c 'inet6 [23]') -gt 1 ]]; then
-		if [ "$auto" = 0 ]; then
-			echo
-			echo "Which IPv6 address should be used?"
-			number_of_ip6=$(ip -6 addr | grep -c 'inet6 [23]')
-			ip -6 addr | grep 'inet6 [23]' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | nl -s ') '
-			read -rp "IPv6 address [1]: " ip6_number
-			until [[ -z "$ip6_number" || "$ip6_number" =~ ^[0-9]+$ && "$ip6_number" -le "$number_of_ip6" ]]; do
-				echo "$ip6_number: invalid selection."
-				read -rp "IPv6 address [1]: " ip6_number
-			done
-			[[ -z "$ip6_number" ]] && ip6_number=1
-		else
-			ip6_number=1
-		fi
-		ip6=$(ip -6 addr | grep 'inet6 [23]' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | sed -n "$ip6_number"p)
 	fi
 }
 
@@ -278,19 +177,14 @@ enter_client_name() {
 	fi
 }
 
-check_firewall() {
-	# Install a firewall if firewalld or iptables are not already available
-	if ! systemctl is-active --quiet firewalld.service && ! hash iptables 2>/dev/null; then
-		if [[ "$os" == "centos" || "$os" == "fedora" ]]; then
-			firewall="firewalld"
-			# We don't want to silently enable firewalld, so we give a subtle warning
-			# If the user continues, firewalld will be installed and enabled during setup
-			echo
-			echo "Note: firewalld, which is required to manage routing tables, will also be installed."
-		elif [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
-			firewall="iptables"
-		fi
-	fi
+enter_public_ip() {
+	echo
+	echo "What is the public IPv4 address?"
+	read -rp "Public IPv4 address: " public_ip
+	until check_ip "$public_ip"; do
+		echo "Invalid input."
+		read -rp "Public IPv4 address: " public_ip
+	done
 }
 
 abort_and_exit() {
@@ -445,7 +339,7 @@ update_sysctl() {
 		|| { /bin/rm -f "$conf_opt"; touch "$conf_opt"; }
 	# Enable TCP BBR congestion control if kernel version >= 4.20
 	if modprobe -q tcp_bbr \
-		&& printf '%s\n%s' "4.20" "$(uname -r)" | sort -C -V \
+		&& printf '%s\n%s' "4.20" "$(uname -r)" | sort -c -V \
 		&& [ -f /proc/sys/net/ipv4/tcp_congestion_control ]; then
 cat >> "$conf_opt" <<'EOF'
 net.core.default_qdisc = fq
@@ -455,27 +349,6 @@ EOF
 	# Apply sysctl settings
 	sysctl -e -q -p "$conf_fwd"
 	sysctl -e -q -p "$conf_opt"
-}
-
-update_rclocal() {
-	ipt_cmd="systemctl restart wg-iptables.service"
-	if ! grep -qs "$ipt_cmd" /etc/rc.local; then
-		if [ ! -f /etc/rc.local ]; then
-			echo '#!/bin/sh' > /etc/rc.local
-		else
-			if [ "$os" = "ubuntu" ] || [ "$os" = "debian" ]; then
-				sed --follow-symlinks -i '/^exit 0/d' /etc/rc.local
-			fi
-		fi
-cat >> /etc/rc.local <<EOF
-
-$ipt_cmd
-EOF
-		if [ "$os" = "ubuntu" ] || [ "$os" = "debian" ]; then
-			echo "exit 0" >> /etc/rc.local
-		fi
-		chmod +x /etc/rc.local
-	fi
 }
 
 show_header() {
@@ -531,16 +404,12 @@ if [[ $(uname -r | cut -d "." -f 1) -eq 2 ]]; then
 	exiterr "The system is running an old kernel, which is incompatible with this installer."
 fi
 
-check_os
-check_os_ver
-
 if systemd-detect-virt -cq 2>/dev/null; then
 	exiterr "This system is running inside a container, which is not supported by this installer."
 fi
 
 auto=0
 if [[ ! -e /etc/wireguard/wg0.conf ]]; then
-	check_nftables
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 			--auto)
@@ -555,13 +424,15 @@ if [[ ! -e /etc/wireguard/wg0.conf ]]; then
 				;;
 		esac
 	done
-	install_wget
+	(
+		set -x
+		apk update >/dev/null
+	) || exiterr2
 	install_iproute
 	show_start_setup
+	enter_public_ip
 	detect_ip
-	check_nat_ip
 	show_config
-	detect_ipv6
 	select_port
 	enter_client_name
 	new_client_dns
@@ -569,86 +440,12 @@ if [[ ! -e /etc/wireguard/wg0.conf ]]; then
 		echo
 		echo "WireGuard installation is ready to begin."
 	fi
-	check_firewall
 	confirm_setup
 	echo
 	echo "Installing WireGuard, please wait..."
-	if [[ "$os" == "ubuntu" ]]; then
-		export DEBIAN_FRONTEND=noninteractive
-		(
-			set -x
-			apt-get -yqq update || apt-get -yqq update
-			apt-get -yqq install wireguard qrencode $firewall >/dev/null
-		) || exiterr2
-	elif [[ "$os" == "debian" && "$os_version" -ge 11 ]]; then
-		export DEBIAN_FRONTEND=noninteractive
-		(
-			set -x
-			apt-get -yqq update || apt-get -yqq update
-			apt-get -yqq install wireguard qrencode $firewall >/dev/null
-		) || exiterr2
-	elif [[ "$os" == "debian" && "$os_version" -eq 10 ]]; then
-		if ! grep -qs '^deb .* buster-backports main' /etc/apt/sources.list /etc/apt/sources.list.d/*.list; then
-			echo "deb http://deb.debian.org/debian buster-backports main" >> /etc/apt/sources.list
-		fi
-		export DEBIAN_FRONTEND=noninteractive
-		(
-			set -x
-			apt-get -yqq update || apt-get -yqq update
-			# Try to install kernel headers for the running kernel and avoid a reboot. This
-			# can fail, so it's important to run separately from the other apt-get command.
-			apt-get -yqq install linux-headers-"$(uname -r)" >/dev/null
-		)
-		# There are cleaner ways to find out the $architecture, but we require an
-		# specific format for the package name and this approach provides what we need.
-		architecture=$(dpkg --get-selections 'linux-image-*-*' | cut -f 1 | grep -oE '[^-]*$' -m 1)
-		# linux-headers-$architecture points to the latest headers. We install it
-		# because if the system has an outdated kernel, there is no guarantee that old
-		# headers were still downloadable and to provide suitable headers for future
-		# kernel updates.
-		(
-			set -x
-			apt-get -yqq install linux-headers-"$architecture" >/dev/null
-			apt-get -yqq install wireguard qrencode $firewall >/dev/null
-		) || exiterr2
-	elif [[ "$os" == "centos" && "$os_version" -eq 9 ]]; then
-		(
-			set -x
-			yum -y -q install epel-release >/dev/null
-			yum -y -q install wireguard-tools qrencode $firewall >/dev/null 2>&1
-		) || exiterr3
-		mkdir -p /etc/wireguard/
-	elif [[ "$os" == "centos" && "$os_version" -eq 8 ]]; then
-		(
-			set -x
-			yum -y -q install epel-release elrepo-release >/dev/null
-			yum -y -q --nobest install kmod-wireguard >/dev/null 2>&1
-			yum -y -q install wireguard-tools qrencode $firewall >/dev/null 2>&1
-		) || exiterr3
-		mkdir -p /etc/wireguard/
-	elif [[ "$os" == "centos" && "$os_version" -eq 7 ]]; then
-		(
-			set -x
-			yum -y -q install epel-release https://www.elrepo.org/elrepo-release-7.el7.elrepo.noarch.rpm >/dev/null
-			yum -y -q install yum-plugin-elrepo >/dev/null 2>&1
-			yum -y -q install kmod-wireguard wireguard-tools qrencode $firewall >/dev/null 2>&1
-		) || exiterr3
-		mkdir -p /etc/wireguard/
-	elif [[ "$os" == "fedora" ]]; then
-		(
-			set -x
-			dnf install -y wireguard-tools qrencode $firewall >/dev/null
-		) || exiterr "'dnf install' failed."
-		mkdir -p /etc/wireguard/
-	fi
+	install_wg_tool
+	install_nftables
 	[ ! -d /etc/wireguard ] && exiterr2
-	# If firewalld was just installed, enable it
-	if [[ "$firewall" == "firewalld" ]]; then
-		(
-			set -x
-			systemctl enable --now firewalld.service >/dev/null 2>&1
-		)
-	fi
 	# Generate wg0.conf
 	cat << EOF > /etc/wireguard/wg0.conf
 # Do not alter the commented lines
@@ -663,83 +460,80 @@ ListenPort = $port
 EOF
 	chmod 600 /etc/wireguard/wg0.conf
 	update_sysctl
-	if systemctl is-active --quiet firewalld.service; then
-		# Using both permanent and not permanent rules to avoid a firewalld reload
-		firewall-cmd -q --add-port="$port"/udp
-		firewall-cmd -q --zone=trusted --add-source=10.7.0.0/24
-		firewall-cmd -q --permanent --add-port="$port"/udp
-		firewall-cmd -q --permanent --zone=trusted --add-source=10.7.0.0/24
-		# Set NAT for the VPN subnet
-		firewall-cmd -q --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to "$ip"
-		firewall-cmd -q --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to "$ip"
-		if [[ -n "$ip6" ]]; then
-			firewall-cmd -q --zone=trusted --add-source=fddd:2c4:2c4:2c4::/64
-			firewall-cmd -q --permanent --zone=trusted --add-source=fddd:2c4:2c4:2c4::/64
-			firewall-cmd -q --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j SNAT --to "$ip6"
-			firewall-cmd -q --permanent --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j SNAT --to "$ip6"
-		fi
-	else
-		# Create a service to set up persistent iptables rules
-		iptables_path=$(command -v iptables)
-		ip6tables_path=$(command -v ip6tables)
-		# nf_tables is not available as standard in OVZ kernels. So use iptables-legacy
-		# if we are in OVZ, with a nf_tables backend and iptables-legacy is available.
-		if [[ $(systemd-detect-virt) == "openvz" ]] && readlink -f "$(command -v iptables)" | grep -q "nft" && hash iptables-legacy 2>/dev/null; then
-			iptables_path=$(command -v iptables-legacy)
-			ip6tables_path=$(command -v ip6tables-legacy)
-		fi
-		echo "[Unit]
-Before=network.target
-[Service]
-Type=oneshot
-ExecStart=$iptables_path -t nat -A POSTROUTING -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to $ip
-ExecStart=$iptables_path -I INPUT -p udp --dport $port -j ACCEPT
-ExecStart=$iptables_path -I FORWARD -s 10.7.0.0/24 -j ACCEPT
-ExecStart=$iptables_path -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-ExecStop=$iptables_path -t nat -D POSTROUTING -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to $ip
-ExecStop=$iptables_path -D INPUT -p udp --dport $port -j ACCEPT
-ExecStop=$iptables_path -D FORWARD -s 10.7.0.0/24 -j ACCEPT
-ExecStop=$iptables_path -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" > /etc/systemd/system/wg-iptables.service
-		if [[ -n "$ip6" ]]; then
-			echo "ExecStart=$ip6tables_path -t nat -A POSTROUTING -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j SNAT --to $ip6
-ExecStart=$ip6tables_path -I FORWARD -s fddd:2c4:2c4:2c4::/64 -j ACCEPT
-ExecStart=$ip6tables_path -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-ExecStop=$ip6tables_path -t nat -D POSTROUTING -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j SNAT --to $ip6
-ExecStop=$ip6tables_path -D FORWARD -s fddd:2c4:2c4:2c4::/64 -j ACCEPT
-ExecStop=$ip6tables_path -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" >> /etc/systemd/system/wg-iptables.service
-		fi
-		echo "RemainAfterExit=yes
-[Install]
-WantedBy=multi-user.target" >> /etc/systemd/system/wg-iptables.service
-		(
-			set -x
-			systemctl enable --now wg-iptables.service >/dev/null 2>&1
-		)
+
+	## OpenRC service
+	echo "#!/sbin/openrc-run
+
+description=\"Manage IP packets for WireGuard service.\"
+
+start()
+{" > /etc/init.d/$wgfw
+	if [[ $firewall == "iptables" ]]; then
+		echo "
+	iptables -t nat -A POSTROUTING -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to $ip
+	iptables -I INPUT -p udp --dport $port -j ACCEPT
+	iptables -I FORWARD -s 10.7.0.0/24 -j ACCEPT
+	iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+" >> /etc/init.d/$wgfw
+	elif [[ $firewall == "nftables" ]]; then
+		echo "
+	nft add table ip wg-nat
+	nft add chain ip wg-nat PREROUTING \"{ type nat hook prerouting priority -100; policy accept; }\"
+	nft add chain ip wg-nat INPUT \"{ type nat hook input priority 100; policy accept; }\"
+	nft add chain ip wg-nat OUTPUT \"{ type nat hook output priority -100; policy accept; }\"
+	nft add chain ip wg-nat POSTROUTING \"{ type nat hook postrouting priority 100; policy accept; }\"
+	nft add rule ip wg-nat POSTROUTING ip saddr 10.7.0.0/24 ip daddr != 10.7.0.0/24 counter snat to $ip
+	nft add table ip wg-filter
+	nft add chain ip wg-filter INPUT \"{ type filter hook input priority 0; policy accept; }\"
+	nft add chain ip wg-filter FORWARD \"{ type filter hook forward priority 0; policy accept; }\"
+	nft add chain ip wg-filter OUTPUT \"{ type filter hook output priority 0; policy accept; }\"
+	nft add rule ip wg-filter INPUT udp dport $port counter accept
+	nft add rule ip wg-filter FORWARD ct state related,established counter accept
+	nft add rule ip wg-filter FORWARD ip saddr 10.7.0.0/24 counter accept
+" >> /etc/init.d/$wgfw
 	fi
-	update_rclocal
+		echo "
+	default_start
+}
+
+stop()
+{" >> /etc/init.d/$wgfw
+	if [[ $firewall == "iptables" ]]; then
+		echo "
+	iptables -D INPUT -p udp --dport $port -j ACCEPT
+	iptables -D FORWARD -s 10.7.0.0/24 -j ACCEPT
+	iptables -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+	iptables -t nat -D POSTROUTING -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to $ip
+" >> /etc/init.d/$wgfw
+	elif [[ $firewall == "nftables" ]]; then
+		echo "
+	nft delete table wg-nat
+	nft delete table wg-filter
+" >> /etc/init.d/$wgfw
+	fi
+	echo "
+	default_stop
+}
+" >> /etc/init.d/$wgfw
+	chmod a+x /etc/init.d/$wgfw
+	(
+		set -x
+		rc-update add $wgfw default >/dev/null 2>&1
+		rc-service $wgfw start
+	)
 	# Generates the custom client.conf
 	new_client_setup
 	# Enable and start the wg-quick service
 	(
 		set -x
-		systemctl enable --now wg-quick@wg0.service >/dev/null 2>&1
+		wg-quick up wg0
 	)
-	echo
-	qrencode -t UTF8 < "$export_dir$client".conf
-	echo -e '\xE2\x86\x91 That is a QR code containing the client configuration.'
-	echo
 	# If the kernel module didn't load, system probably had an outdated kernel
 	# We'll try to help, but will not force a kernel upgrade upon the user
 	if ! modprobe -nq wireguard; then
 		echo "Warning!"
 		echo "Installation was finished, but the WireGuard kernel module could not load."
-		if [[ "$os" == "ubuntu" && "$os_version" -eq 1804 ]]; then
-			echo 'Upgrade the kernel and headers with "apt-get install linux-generic" and restart.'
-		elif [[ "$os" == "debian" && "$os_version" -eq 10 ]]; then
-			echo "Upgrade the kernel with \"apt-get install linux-image-$architecture\" and restart."
-		elif [[ "$os" == "centos" && "$os_version" -le 8 ]]; then
-			echo "Reboot the system to load the most recent kernel."
-		fi
+		echo "Reboot the system to load the most recent kernel."
 	else
 		echo "Finished!"
 	fi
@@ -779,10 +573,6 @@ else
 			new_client_setup
 			# Append new client configuration to the WireGuard interface
 			wg addconf wg0 <(sed -n "/^# BEGIN_PEER $client/,/^# END_PEER $client/p" /etc/wireguard/wg0.conf)
-			echo
-			qrencode -t UTF8 < "$export_dir$client".conf
-			echo -e '\xE2\x86\x91 That is a QR code containing the client configuration.'
-			echo
 			echo "$client added. Configuration available in: $export_dir$client.conf"
 			exit
 		;;
@@ -860,75 +650,29 @@ else
 				echo
 				echo "Removing WireGuard, please wait..."
 				port=$(grep '^ListenPort' /etc/wireguard/wg0.conf | cut -d " " -f 3)
-				if systemctl is-active --quiet firewalld.service; then
-					ip=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING | grep '\-s 10.7.0.0/24 '"'"'!'"'"' -d 10.7.0.0/24' | grep -oE '[^ ]+$')
-					# Using both permanent and not permanent rules to avoid a firewalld reload.
-					firewall-cmd -q --remove-port="$port"/udp
-					firewall-cmd -q --zone=trusted --remove-source=10.7.0.0/24
-					firewall-cmd -q --permanent --remove-port="$port"/udp
-					firewall-cmd -q --permanent --zone=trusted --remove-source=10.7.0.0/24
-					firewall-cmd -q --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to "$ip"
-					firewall-cmd -q --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to "$ip"
-					if grep -qs 'fddd:2c4:2c4:2c4::1/64' /etc/wireguard/wg0.conf; then
-						ip6=$(firewall-cmd --direct --get-rules ipv6 nat POSTROUTING | grep '\-s fddd:2c4:2c4:2c4::/64 '"'"'!'"'"' -d fddd:2c4:2c4:2c4::/64' | grep -oE '[^ ]+$')
-						firewall-cmd -q --zone=trusted --remove-source=fddd:2c4:2c4:2c4::/64
-						firewall-cmd -q --permanent --zone=trusted --remove-source=fddd:2c4:2c4:2c4::/64
-						firewall-cmd -q --direct --remove-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j SNAT --to "$ip6"
-						firewall-cmd -q --permanent --direct --remove-rule ipv6 nat POSTROUTING 0 -s fddd:2c4:2c4:2c4::/64 ! -d fddd:2c4:2c4:2c4::/64 -j SNAT --to "$ip6"
-					fi
-				else
-					systemctl disable --now wg-iptables.service
-					rm -f /etc/systemd/system/wg-iptables.service
-				fi
-				systemctl disable --now wg-quick@wg0.service
+				rc-update delete $wgfw default
+				rc-service $wgfw stop
+				rm -f /etc/init.d/$wgfw
+				wg-quick down wg0
+				rm /etc/wireguard/wg0.conf
 				rm -f /etc/sysctl.d/99-wireguard-forward.conf /etc/sysctl.d/99-wireguard-optimize.conf
 				if [ ! -f /usr/sbin/openvpn ] && [ ! -f /usr/sbin/ipsec ] \
 					&& [ ! -f /usr/local/sbin/ipsec ]; then
 					echo 0 > /proc/sys/net/ipv4/ip_forward
 					echo 0 > /proc/sys/net/ipv6/conf/all/forwarding
 				fi
-				ipt_cmd="systemctl restart wg-iptables.service"
-				if grep -qs "$ipt_cmd" /etc/rc.local; then
-					sed --follow-symlinks -i "/^$ipt_cmd/d" /etc/rc.local
+				read -rp "Remove wireguard-tools [N]: " rm_wg_tools
+				[[ -z "$rm_wg_tools" ]] && rm_wg_tools=N
+				until [[ "$rm_wg_tools" =~ ^[yYnN]*$ ]]; do
+					echo "invalid selection."
+					read -rp "Remove wireguard-tools [y/N]: " rm_wg_tools
+				done
+				if [[ "$rm_wg_tools" =~ ^[yY]*$ ]]; then
+					echo "removing wg-tools"
+					apk del wireguard-tools >/dev/null
+				else
+					echo "skipped"
 				fi
-				if [[ "$os" == "ubuntu" ]]; then
-					(
-						set -x
-						rm -rf /etc/wireguard/
-						apt-get remove --purge -y wireguard wireguard-tools >/dev/null
-					)
-				elif [[ "$os" == "debian" && "$os_version" -ge 11 ]]; then
-					(
-						set -x
-						rm -rf /etc/wireguard/
-						apt-get remove --purge -y wireguard wireguard-tools >/dev/null
-					)
-				elif [[ "$os" == "debian" && "$os_version" -eq 10 ]]; then
-					(
-						set -x
-						rm -rf /etc/wireguard/
-						apt-get remove --purge -y wireguard wireguard-dkms wireguard-tools >/dev/null
-					)
-				elif [[ "$os" == "centos" && "$os_version" -eq 9 ]]; then
-					(
-						set -x
-						yum -y -q remove wireguard-tools >/dev/null
-						rm -rf /etc/wireguard/
-					)
-				elif [[ "$os" == "centos" && "$os_version" -le 8 ]]; then
-					(
-						set -x
-						yum -y -q remove kmod-wireguard wireguard-tools >/dev/null
-						rm -rf /etc/wireguard/
-					)
-				elif [[ "$os" == "fedora" ]]; then
-					(
-						set -x
-						dnf remove -y wireguard-tools >/dev/null
-						rm -rf /etc/wireguard/
-					)
-				fi
-				echo
 				echo "WireGuard removed!"
 			else
 				echo
